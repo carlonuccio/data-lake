@@ -2,7 +2,7 @@ import configparser
 import os
 from datetime import datetime
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import udf
+from pyspark.sql.functions import udf, monotonically_increasing_id
 
 config = configparser.ConfigParser()
 config.read('dl.cfg')
@@ -114,7 +114,10 @@ def process_log_data(spark, input_data, output_data):
                                           (staging_events.artist == staging_songs.artist_name), "inner")\
                                     .selectExpr("start_time", "userId AS user_id", "level", "song_id",
                                                 "artist_id", "sessionId AS session_id", "location",
-                                                "userAgent     AS user_agent")
+                                                "userAgent     AS user_agent",
+                                                "EXTRACT(month FROM start_time)      AS month",
+                                                "EXTRACT(year FROM start_time)       AS year")\
+                                    .withColumn('songplay_id', monotonically_increasing_id())
 
     # write songplays table to parquet files partitioned by year and month
     songplays_table.write.partitionBy('year', 'month') \

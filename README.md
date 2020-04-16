@@ -19,7 +19,7 @@ Using the song and log datasets, you'll need to create a star schema optimized f
 
 #### Fact Table:
 **songplays** - records in log data associated with song plays i.e. records with page **NextSong**\
-*songplay_id, start_time, user_id, level, song_id, artist_id, session_id, location, user_agent*
+*songplay_id, start_time, user_id, level, song_id, artist_id, session_id, location, user_agent, month, year
 
 #### Dimension Tables
 **users** - users in the app\

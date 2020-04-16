@@ -1,11 +1,11 @@
 import configparser
 import os
-from pyspark.sql import SparkSession, SQLContext
-
+from datetime import datetime
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import udf
 
 config = configparser.ConfigParser()
 config.read('dl.cfg')
-
 
 os.environ['AWS_ACCESS_KEY_ID'] = config['AWS']['AWS_ACCESS_KEY_ID']
 os.environ['AWS_SECRET_ACCESS_KEY'] = config['AWS']['AWS_SECRET_ACCESS_KEY']
@@ -34,39 +34,26 @@ def process_song_data(spark, input_data, output_data):
     """
     # get filepath to song data file
     song_data = input_data + 'song_data/*/*/*/*.json'
-    
-    # read song data file
-    df = spark.read.json(song_data)
-    df.registerTempTable("staging_songs")
 
-    sqlContext = SQLContext(spark.sparkContext)
+    # read song data file
+    staging_songs = spark.read.json(song_data)
 
     # extract columns to create songs table
-    songs_table = sqlContext.sql("""
-                     SELECT  DISTINCT song_id AS song_id,
-                                      title,
-                                      artist_id,
-                                      year,
-                                      duration
-                     FROM staging_songs
-                     WHERE song_id IS NOT NULL;
-                  """)
-    
+    songs_table = staging_songs.select(['song_id', 'title', 'artist_id', 'year', 'duration'])\
+                               .where(staging_songs.song_id.isNotNull())\
+                               .dropDuplicates(['song_id'])
+
     # write songs table to parquet files partitioned by year and artist
     songs_table.write.partitionBy('year', 'artist_id') \
-                     .parquet(os.path.join(output_data, 'dend_4/songs.parquet'), 'overwrite')
+        .parquet(os.path.join(output_data, 'dend_4/songs.parquet'), 'overwrite')
 
     # extract columns to create artists table
-    artists_table = sqlContext.sql("""
-                         SELECT  DISTINCT artist_id  AS artist_id,
-                                          artist_name         AS name,
-                                          artist_location     AS location,
-                                          artist_latitude     AS latitude,
-                                          artist_longitude    AS longitude
-                                 FROM staging_songs
-                                 WHERE artist_id IS NOT NULL;
-                         """)
-    
+    artists_table = staging_songs.selectExpr("artist_id", "artist_name as name",
+                                             "artist_location as location", "artist_latitude as latitude",
+                                             "artist_longitude as longitude")\
+                                 .where(staging_songs.artist_id.isNotNull()) \
+                                 .dropDuplicates(['artist_id'])
+
     # write artists table to parquet files
     artists_table.write.parquet(os.path.join(output_data, 'dend_4/artists.parquet'), 'overwrite')
 
@@ -81,66 +68,55 @@ def process_log_data(spark, input_data, output_data):
     :param output_data: path output data
     """
     # get filepath to log data file
-    log_data = input_data + 'log_data/*.json'
+    log_data = input_data + 'log_data/*/*/*.json'
 
     # read log data file
-    df = spark.read.json(log_data)
-    
+    staging_events = spark.read.json(log_data)
+
     # filter by actions for song plays
-    df = df.filter(df.page == 'NextSong')
-    df.registerTempTable("staging_events")
+    staging_events = staging_events.filter(staging_events.page == 'NextSong')
 
-    sqlContext = SQLContext(spark.sparkContext)
+    # extract columns for users table
+    users_table = staging_events.selectExpr("userId as user_id", "firstName as first_name",
+                                             "lastName as last_name", "gender",
+                                             "level")\
+                                 .where(staging_events.userId.isNotNull() &
+                                        staging_events.level.isNotNull()) \
+                                 .dropDuplicates(['user_id', 'level'])
 
-    # extract columns for users table    
-    users_table = sqlContext.sql("""
-                                SELECT  DISTINCT userId     AS user_id,
-                                        firstName           AS first_name,
-                                        lastName            AS last_name,
-                                        gender,
-                                        level
-                                FROM staging_events
-                                WHERE user_id IS NOT NULL and level IS NOT NULL;
-                         """)
-    
     # write users table to parquet files
     users_table.write.parquet(os.path.join(output_data, 'dend_4/users.parquet'), 'overwrite')
 
+
     # create timestamp column from original timestamp column
-    time_table = sqlContext.sql("""
-                                SELECT  DISTINCT start_time                 AS start_time,
-                                        EXTRACT(hour FROM start_time)       AS hour,
-                                        EXTRACT(day FROM start_time)        AS day,
-                                        EXTRACT(week FROM start_time)       AS week,
-                                        EXTRACT(month FROM start_time)      AS month,
-                                        EXTRACT(year FROM start_time)       AS year,
-                                        EXTRACT(dayofweek FROM start_time)  as weekday
-                                FROM staging_events
-                                """)
-    
+    get_datetime = udf(lambda x: str(datetime.fromtimestamp(int(x) / 1000.0)))
+    staging_events = staging_events.withColumn("start_time", get_datetime(staging_events.ts))
+
+    # extract columns for time table
+    time_table = staging_events.selectExpr("start_time", "EXTRACT(hour FROM start_time) as hour",
+                                             "EXTRACT(day FROM start_time) as day",
+                                             "EXTRACT(week FROM start_time)       AS week",
+                                             "EXTRACT(month FROM start_time)      AS month",
+                                             "EXTRACT(year FROM start_time)       AS year",
+                                             "EXTRACT(dayofweek FROM start_time)  as weekday")\
+                                 .where(staging_events.start_time.isNotNull()) \
+                                 .dropDuplicates(['start_time'])
+
     # write time table to parquet files partitioned by year and month
     time_table.write.partitionBy('year', 'month') \
         .parquet(os.path.join(output_data, 'dend_4/time.parquet'), 'overwrite')
 
     # read in song data to use for songplays table
-    song_df = spark.read.json(input_data + 'song_data/*/*/*/*.json')
-    song_df.registerTempTable("staging_songs")
+    staging_songs = spark.read.json(input_data + 'song_data/*/*/*/*.json')
+    staging_songs.registerTempTable("staging_songs")
+
 
     # extract columns from joined song and log datasets to create songplays table 
-    songplays_table = sqlContext.sql("""
-                                   SELECT  e.ts            AS start_time, 
-                                            e.userId        AS user_id, 
-                                            e.level         AS level, 
-                                            so.idSong       AS idSong,
-                                            a.idArtist      AS idArtist
-                                            e.sessionId     AS session_id, 
-                                            e.location      AS location, 
-                                            e.userAgent     AS user_agent
-                                    FROM staging_events e
-                                    JOIN staging_songs  s   ON (e.song = s.title AND e.artist = s.artist_name)
-                                    JOIN songs so on s.song_id = so.song_id
-                                    JOIN artists a on s.artist_id = a.artist_id
-                                """)
+    songplays_table = staging_events.join(staging_songs, (staging_events.song == staging_songs.title) &
+                                          (staging_events.artist == staging_songs.artist_name), "inner")\
+                                    .selectExpr("start_time", "userId AS user_id", "level", "song_id",
+                                                "artist_id", "sessionId AS session_id", "location",
+                                                "userAgent     AS user_agent")
 
     # write songplays table to parquet files partitioned by year and month
     songplays_table.write.partitionBy('year', 'month') \
@@ -151,8 +127,8 @@ def main():
     spark = create_spark_session()
     input_data = "s3a://udacity-dend/"
     output_data = "s3a://<output-data>/"
-    
-    process_song_data(spark, input_data, output_data)    
+
+    process_song_data(spark, input_data, output_data)
     process_log_data(spark, input_data, output_data)
 
 
